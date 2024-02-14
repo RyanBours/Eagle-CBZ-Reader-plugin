@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "etl": "^0.7.0",
+    "unzipper": "^0.10.14"
+  }
+}

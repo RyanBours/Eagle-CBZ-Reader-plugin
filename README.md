@@ -1,3 +1,7 @@
+# Comic Book Reader
+
+An Eagle plugin to read comic book files from within the Eagle App.
+
 A cbz file is a comic book archive file that contains images inside it. The files are compressed and stored in a .zip format and named **.cbz**.
 Each image in the archive is named with a number e.g.: 01.png, 02.png, 03.png, etc. It Does not matter what the are called as long as the name is used to sort the images in the correct order.
 

@@ -10,3 +10,6 @@ This version works only with .png, .jpg and .jpeg files. It will not work with o
 A Test file is included > [Elf Receiver Radio-Craft August 1936.cbz](<Elf Receiver Radio-Craft August 1936.cbz>)
 
 It only supports .cbz files.
+
+## example
+![feature preview](cbz_feature_img.png)

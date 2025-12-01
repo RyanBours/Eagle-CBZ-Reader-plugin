@@ -1,20 +1,38 @@
 const fs = require('fs');
-const cbz = require('./../js/cbz-util.js');
+const path = require('path');
+const unzipper = require('unzipper');
 
 module.exports = async ({ src, dest, item }) => {
-    return new Promise(async (resolve, reject) => {
-        try {
-            // load thumbnail from cbz as base64 string
-            const { thumbnail } = await cbz.load(src);
+    try {
+        // Supported image extensions
+        const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
 
-            // save the thumbnail to dest
-            fs.writeFileSync(dest, Buffer.from(thumbnail.split(',')[1], 'base64'));
+        // Read and extract CBZ file
+        const directory = await unzipper.Open.file(src);
 
-            // update the item thumbnail
-            return resolve(item);
+        // Filter and sort image files
+        const imageFiles = directory.files
+            .filter(file => {
+                const ext = path.extname(file.path).toLowerCase();
+                return imageExtensions.includes(ext) && !file.path.startsWith('__MACOSX');
+            })
+            .sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' }));
+
+        if (imageFiles.length === 0) {
+            throw new Error('No images found in CBZ file');
         }
-        catch (err) {
-            return reject(err);
-        }
-    });
+
+        // Extract the first image
+        const firstImage = imageFiles[0];
+        const buffer = await firstImage.buffer();
+
+        // Save the thumbnail to dest
+        fs.writeFileSync(dest, buffer);
+
+        // Return the updated item
+        return item;
+    }
+    catch (err) {
+        throw err;
+    }
 }

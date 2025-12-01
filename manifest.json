@@ -19,8 +19,13 @@
                 "size": 400
             },
             "viewer": {
-                "path": "viewer/cbz.html"
+                "path": "viewer/index.html"
             }
         }
+    },
+    "main": {
+        "url": "index.html",
+        "width": 640,
+        "height": 480
     }
 }

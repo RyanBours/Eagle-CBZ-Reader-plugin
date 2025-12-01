@@ -34,6 +34,61 @@ const load = async (dir) => {
     });
 }
 
+const loadByIndex = async (dir, index) => {
+    return new Promise(async (resolve, reject) => {
+        try {
+            let currentIndex = 0;
+            fs.createReadStream(dir)
+                .pipe(unzipper.Parse())
+                .pipe(etl.map(entry => {
+                    if (image_extensions.test(entry.path)) {
+                        if (currentIndex === index) {
+                            return entry.buffer().then(buffer => {
+                                const imageData = `data:image/png;base64,${buffer.toString('base64')}`;
+                                return resolve(imageData);
+                            });
+                        }
+                        currentIndex++;
+                        entry.autodrain();
+                    } else {
+                        entry.autodrain();
+                    }
+                }))
+                .on('finish', () => {
+                    return reject(new Error('Index out of bounds'));
+                });
+        } catch (err) {
+            return reject(err);
+        }
+    });
+}
+
+const readZipEntries = async (dir) => {
+    return new Promise(async (resolve, reject) => {
+        try {
+            let entries = [];
+            fs.createReadStream(dir)
+                .pipe(unzipper.Parse())
+                .on('entry', entry => {
+                    entries.push(entry.path);
+                    entry.autodrain();
+                })
+                .on('close', () => {
+                    return resolve(entries);
+                });
+        } catch (err) {
+            return reject(err);
+        }
+    });
+}
+
+const logmsg = (msg) => {
+    console.log(`[cbz-util] ${msg}`);
+}
+
 module.exports = {
-    load
+    load,
+    loadByIndex,
+    readZipEntries,
+    logmsg
 }

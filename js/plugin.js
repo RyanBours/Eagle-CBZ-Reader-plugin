@@ -10,6 +10,8 @@ let currentZoom = 1;
 let zoomIndicatorTimeout = null;
 let autoFitOnPageChange = true;
 let dualPageMode = false;
+let coverOffset = false;
+let leftToRight = false;
 
 // Pan state
 let isPanning = false;
@@ -20,7 +22,7 @@ let panY = 0;
 
 // UI Elements
 let comicImage, pageInput, totalPagesSpan, prevBtn, nextBtn, loader, comicViewer, zoomIndicator, recenterBtn, fitBtn, autoFitBtn;
-let previewToggleBtn, previewPanel, thumbnailGrid, dualPageBtn, comicImage2;
+let previewToggleBtn, previewPanel, thumbnailGrid, dualPageBtn, comicImage2, coverOffsetBtn, readDirectionBtn;
 
 eagle.onPluginCreate((plugin) => {
 	console.log('eagle.onPluginCreate');
@@ -47,6 +49,8 @@ function pluginInit() {
 	thumbnailGrid = document.getElementById('thumbnail-grid');
 	dualPageBtn = document.getElementById('dual-page-btn');
 	comicImage2 = document.getElementById('comic-image-2');
+	coverOffsetBtn = document.getElementById('cover-offset-btn');
+	readDirectionBtn = document.getElementById('read-direction-btn');
 
 	console.log('UI Elements initialized:', {
 		recenterBtn: !!recenterBtn,
@@ -76,6 +80,8 @@ function pluginInit() {
 	autoFitBtn.addEventListener('click', toggleAutoFit);
 	previewToggleBtn.addEventListener('click', togglePreview);
 	dualPageBtn.addEventListener('click', toggleDualPage);
+	coverOffsetBtn.addEventListener('click', toggleCoverOffset);
+	readDirectionBtn.addEventListener('click', toggleReadDirection);
 
 	// Add pan listeners
 	comicViewer.addEventListener('mousedown', startPan);
@@ -277,6 +283,60 @@ function updateDualPageView() {
 	} else {
 		comicImage2.classList.add('hidden');
 	}
+	updateImageOrder();
+}
+
+function toggleReadDirection() {
+	leftToRight = !leftToRight;
+	updateReadDirectionButton();
+	updateImageOrder();
+}
+
+function updateReadDirectionButton() {
+	if (readDirectionBtn) {
+		if (leftToRight) {
+			readDirectionBtn.classList.add('active');
+			readDirectionBtn.textContent = 'L→R';
+		} else {
+			readDirectionBtn.classList.remove('active');
+			readDirectionBtn.textContent = 'R→L';
+		}
+	}
+}
+
+function updateImageOrder() {
+	const imageContainer = document.querySelector('.image-container');
+	if (imageContainer && dualPageMode) {
+		if (leftToRight) {
+			// Left to right: image1, image2
+			imageContainer.style.flexDirection = 'row';
+		} else {
+			// Right to left: image2, image1 (reverse)
+			imageContainer.style.flexDirection = 'row-reverse';
+		}
+	} else {
+		// Single page mode - reset to normal
+		imageContainer.style.flexDirection = 'row';
+	}
+}
+
+function toggleCoverOffset() {
+	coverOffset = !coverOffset;
+	updateCoverOffsetButton();
+	// Refresh current page view
+	showPage(currentPage);
+}
+
+function updateCoverOffsetButton() {
+	if (coverOffsetBtn) {
+		if (coverOffset) {
+			coverOffsetBtn.classList.add('active');
+			coverOffsetBtn.textContent = 'Cover: ON';
+		} else {
+			coverOffsetBtn.classList.remove('active');
+			coverOffsetBtn.textContent = 'Cover: OFF';
+		}
+	}
 }
 
 function togglePreview() {
@@ -443,6 +503,14 @@ async function loadCBZ(filePath) {
 			if (dualPageBtn) {
 				dualPageBtn.disabled = false;
 				updateDualPageButton();
+			}
+			if (coverOffsetBtn) {
+				coverOffsetBtn.disabled = false;
+				updateCoverOffsetButton();
+			}
+			if (readDirectionBtn) {
+				readDirectionBtn.disabled = false;
+				updateReadDirectionButton();
 			} console.log('Buttons state after enabling:', {
 				recenterDisabled: recenterBtn?.disabled,
 				fitDisabled: fitBtn?.disabled
@@ -481,7 +549,26 @@ function showPage(pageNumber) {
 		img1.src = pages[currentPage - 1];
 
 		// Load second page if in dual-page mode
-		if (dualPageMode && currentPage < totalPages && pages[currentPage]) {
+		// With cover offset: page 1 shows alone, page 2+ shows in pairs (2-3, 4-5, etc.)
+		// Without cover offset: pages show in pairs from start (1-2, 3-4, etc.)
+		let shouldShowSecondPage = false;
+		let secondPageIndex = currentPage; // Default to next page
+
+		if (dualPageMode) {
+			if (coverOffset) {
+				// With cover offset: show second page only if current page is even and not the last page
+				if (currentPage % 2 === 0 && currentPage < totalPages) {
+					shouldShowSecondPage = true;
+				}
+			} else {
+				// Without cover offset: show second page if not on last page
+				if (currentPage < totalPages) {
+					shouldShowSecondPage = true;
+				}
+			}
+		}
+
+		if (shouldShowSecondPage && pages[secondPageIndex]) {
 			const img2 = new Image();
 			img2.onload = () => {
 				const ctx2 = comicImage2.getContext('2d');
@@ -497,10 +584,13 @@ function showPage(pageNumber) {
 					updateZoom();
 				}
 			};
-			img2.src = pages[currentPage];
+			img2.src = pages[secondPageIndex];
 		} else {
 			comicImage2.classList.add('hidden');
 		}
+
+		// Update image order based on reading direction
+		updateImageOrder();
 
 		// Preload next image after current one loads
 		preloadNextImage();
@@ -531,14 +621,38 @@ function updateNavigation() {
 
 function previousPage() {
 	if (currentPage > 1) {
-		const step = dualPageMode ? 2 : 1;
+		let step = 1;
+		if (dualPageMode) {
+			if (coverOffset) {
+				// With cover offset: page 1 is alone, then pairs (2-3, 4-5, etc.)
+				if (currentPage === 2) {
+					step = 1; // Go from page 2 to page 1 (cover)
+				} else {
+					step = 2; // Normal dual-page step
+				}
+			} else {
+				step = 2;
+			}
+		}
 		showPage(Math.max(1, currentPage - step));
 	}
 }
 
 function nextPage() {
 	if (currentPage < totalPages) {
-		const step = dualPageMode ? 2 : 1;
+		let step = 1;
+		if (dualPageMode) {
+			if (coverOffset) {
+				// With cover offset: page 1 is alone, then pairs (2-3, 4-5, etc.)
+				if (currentPage === 1) {
+					step = 1; // Go from page 1 to page 2 (start of first pair)
+				} else {
+					step = 2; // Normal dual-page step
+				}
+			} else {
+				step = 2;
+			}
+		}
 		showPage(Math.min(totalPages, currentPage + step));
 	}
 }

@@ -21,6 +21,13 @@
             "viewer": {
                 "path": "viewer/index.html"
             }
+        },
+        "zip": {
+            "inspector": {
+                "path": "inspector/index.html",
+                "height": 100,
+                "multiSelect": false
+            }
         }
     },
     "main": {

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>Inspector Plugin Example</title>
+    <style>
+        html {
+            font-size: 11px;
+            font-family: sans-serif;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        body {
+            padding: 0;
+            margin: 0;
+            color: transparent;
+        }
+
+        /* colors for different themes */
+
+        body[theme="LIGHT"],
+        body[theme="LIGHTGRAY"] {
+            color: black;
+        }
+
+        body[theme="GRAY"],
+        body[theme="BLUE"],
+        body[theme="PURPLE"],
+        body[theme="DARK"] {
+            color: white;
+        }
+    </style>
+</head>
+
+<body>
+    Inspector Plugin Example
+    <script>
+        // Listen to plugin creation
+        eagle.onPluginCreate(async (plugin) => {
+
+            // Get the current theme
+            const theme = await eagle.app.theme;
+            document.body.setAttribute('theme', theme);
+
+            // Get the selected item
+            const item = await eagle.item.getSelected();
+
+            console.log(item);
+            console.log(theme);
+        });
+
+        // Listen to theme changes
+        eagle.onThemeChanged((theme) => {
+            document.body.setAttribute('theme', theme);
+        });
+
+        const handleClick = async () => {
+            const fs = require('fs');
+            const path = require('path');
+            const os = require('os');
+
+            try {
+                let items = await eagle.item.getSelected();
+                let item = items[0];
+
+                console.log('Item:', item);
+                console.log('Current extension:', item.ext);
+
+                // Get the original file path
+                const originalPath = item.filePath;
+
+                // Check if it's already a .cbz file
+                if (item.ext.toLowerCase() === 'cbz') {
+                    alert('File is already a .cbz file!');
+                    return;
+                }
+
+                // Create a temporary file with .cbz extension
+                const tempDir = os.tmpdir();
+                const baseName = path.basename(originalPath, path.extname(originalPath));
+                const tempPath = path.join(tempDir, baseName + '.cbz');
+
+                console.log('Copying to temp location:', tempPath);
+
+                // Copy the file to temp location with new extension
+                fs.copyFileSync(originalPath, tempPath);
+
+                console.log('Replacing file in Eagle...');
+
+                // Replace the file in Eagle (this will update extension and refresh thumbnail automatically)
+                const result = await item.replaceFile(tempPath);
+
+                console.log('Replace result:', result);
+
+                // Clean up temp file
+                try {
+                    fs.unlinkSync(tempPath);
+                } catch (cleanupErr) {
+                    console.warn('Could not delete temp file:', cleanupErr);
+                }
+
+                // The operation works even if result is false/undefined, so check the actual item state
+                console.log('New extension:', item.ext);
+                // alert('File converted to .cbz successfully!');
+            } catch (err) {
+                console.error('Error:', err);
+                // alert('Error: ' + err.message);
+            }
+        };
+    </script>
+    <button onclick="handleClick()">Click me</button>
+</body>
+
+</html>

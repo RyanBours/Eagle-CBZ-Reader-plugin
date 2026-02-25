@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const unzipper = require('unzipper');
+const unrar = require('node-unrar-js');
 let heicConvert = null;
 
 try {
@@ -50,16 +51,95 @@ function sortByNormalizedPath(a, b) {
     return pathA.localeCompare(pathB, undefined, { numeric: true, sensitivity: 'base' });
 }
 
+function matchesSignature(header, signature) {
+    if (!header || header.length < signature.length) {
+        return false;
+    }
+
+    for (let index = 0; index < signature.length; index++) {
+        if (header[index] !== signature[index]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function detectArchiveFormat(filePath) {
+    let fileDescriptor;
+    try {
+        fileDescriptor = fs.openSync(filePath, 'r');
+        const header = Buffer.alloc(8);
+        const bytesRead = fs.readSync(fileDescriptor, header, 0, 8, 0);
+        const signature = header.subarray(0, bytesRead);
+
+        const zipLocal = [0x50, 0x4B, 0x03, 0x04];
+        const zipEmpty = [0x50, 0x4B, 0x05, 0x06];
+        const zipSpanned = [0x50, 0x4B, 0x07, 0x08];
+        if (matchesSignature(signature, zipLocal) || matchesSignature(signature, zipEmpty) || matchesSignature(signature, zipSpanned)) {
+            return 'zip';
+        }
+
+        const rar4 = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
+        const rar5 = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
+        if (matchesSignature(signature, rar4) || matchesSignature(signature, rar5)) {
+            return 'rar';
+        }
+
+        return 'unknown';
+    } catch (error) {
+        console.warn('Failed to detect archive format for thumbnail.', error?.message || error);
+        return 'unknown';
+    } finally {
+        if (typeof fileDescriptor === 'number') {
+            try {
+                fs.closeSync(fileDescriptor);
+            } catch (_closeError) {
+                // ignore close errors
+            }
+        }
+    }
+}
+
+async function getArchiveEntries(filePath, archiveFormat) {
+    if (archiveFormat === 'rar') {
+        const archiveData = fs.readFileSync(filePath);
+        const extractor = await unrar.createExtractorFromData({
+            data: Uint8Array.from(archiveData).buffer
+        });
+        const extracted = extractor.extract();
+        const extractedFiles = [...extracted.files];
+
+        return extractedFiles.map((entry) => {
+            const fileHeader = entry.fileHeader || {};
+            const isDirectory = !!fileHeader.flags?.directory;
+            return {
+                path: fileHeader.name || '',
+                type: isDirectory ? 'Directory' : 'File',
+                buffer: async () => toNodeBuffer(entry.extraction)
+            };
+        });
+    }
+
+    const directory = await unzipper.Open.file(filePath);
+    return directory.files;
+}
+
 module.exports = async ({ src, dest, item }) => {
     try {
         // Supported image extensions
         const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif'];
 
+        const archiveFormat = detectArchiveFormat(src);
+        if (archiveFormat !== 'zip' && archiveFormat !== 'rar') {
+            throw new Error('Unsupported archive format for thumbnail generation.');
+        }
+
         // Read and extract CBZ file
-        const directory = await unzipper.Open.file(src);
+        const entries = await getArchiveEntries(src, archiveFormat);
 
         // Filter and sort image files
-        const imageFiles = directory.files
+        const imageFiles = entries
             .filter(file => isSupportedImageEntry(file, imageExtensions))
             .sort(sortByNormalizedPath);
 

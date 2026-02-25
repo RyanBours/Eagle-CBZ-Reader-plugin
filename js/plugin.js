@@ -1,6 +1,7 @@
 const unzipper = require('unzipper');
 const fs = require('fs');
 const path = require('path');
+const unrar = require('node-unrar-js');
 let heicConvert = null;
 
 try {
@@ -42,6 +43,85 @@ function sortByNormalizedPath(a, b) {
 	const pathA = normalizeZipPath(a.path);
 	const pathB = normalizeZipPath(b.path);
 	return pathA.localeCompare(pathB, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function matchesSignature(header, signature) {
+	if (!header || header.length < signature.length) {
+		return false;
+	}
+
+	for (let index = 0; index < signature.length; index++) {
+		if (header[index] !== signature[index]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+function detectArchiveFormat(filePath) {
+	let fileDescriptor;
+	try {
+		fileDescriptor = fs.openSync(filePath, 'r');
+		const header = Buffer.alloc(8);
+		const bytesRead = fs.readSync(fileDescriptor, header, 0, 8, 0);
+		const signature = header.subarray(0, bytesRead);
+
+		const zipLocal = [0x50, 0x4B, 0x03, 0x04];
+		const zipEmpty = [0x50, 0x4B, 0x05, 0x06];
+		const zipSpanned = [0x50, 0x4B, 0x07, 0x08];
+		if (matchesSignature(signature, zipLocal) || matchesSignature(signature, zipEmpty) || matchesSignature(signature, zipSpanned)) {
+			return 'zip';
+		}
+
+		const rar4 = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
+		const rar5 = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
+		if (matchesSignature(signature, rar4) || matchesSignature(signature, rar5)) {
+			return 'rar';
+		}
+
+		const sevenZip = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+		if (matchesSignature(signature, sevenZip)) {
+			return '7z';
+		}
+
+		return 'unknown';
+	} catch (error) {
+		console.warn('Failed to detect archive format.', error?.message || error);
+		return 'unknown';
+	} finally {
+		if (typeof fileDescriptor === 'number') {
+			try {
+				fs.closeSync(fileDescriptor);
+			} catch (_closeError) {
+				// ignore close errors
+			}
+		}
+	}
+}
+
+async function getArchiveEntries(filePath, archiveFormat) {
+	if (archiveFormat === 'rar') {
+		const archiveData = fs.readFileSync(filePath);
+		const extractor = await unrar.createExtractorFromData({
+			data: Uint8Array.from(archiveData).buffer
+		});
+		const extracted = extractor.extract();
+		const extractedFiles = [...extracted.files];
+
+		return extractedFiles.map((entry) => {
+			const fileHeader = entry.fileHeader || {};
+			const isDirectory = !!fileHeader.flags?.directory;
+			return {
+				path: fileHeader.name || '',
+				type: isDirectory ? 'Directory' : 'File',
+				buffer: async () => toNodeBuffer(entry.extraction)
+			};
+		});
+	}
+
+	const directory = await unzipper.Open.file(filePath);
+	return directory.files;
 }
 
 // Comic reader state
@@ -687,11 +767,17 @@ async function loadCBZ(filePath) {
 		revokeActiveObjectUrls();
 		pages = [];
 
-		// Read and extract CBZ file
-		const directory = await unzipper.Open.file(filePath);
+		const archiveFormat = detectArchiveFormat(filePath);
+		if (archiveFormat !== 'zip' && archiveFormat !== 'rar') {
+			if (archiveFormat === '7z') {
+				throw new Error('This file appears to be a 7z archive. CBZ files must use ZIP format.');
+			}
+		}
+
+		const archiveEntries = await getArchiveEntries(filePath, archiveFormat);
 
 		// Filter and sort media files
-		const mediaFiles = directory.files
+		const mediaFiles = archiveEntries
 			.filter(isSupportedMediaEntry)
 			.sort(sortByNormalizedPath);
 
@@ -749,7 +835,13 @@ async function loadCBZ(filePath) {
 	} catch (error) {
 		console.error('Error loading CBZ:', error);
 		loader.classList.add('hidden');
-		alert('Failed to load CBZ file: ' + error.message);
+
+		let message = error?.message || 'Unknown error';
+		if (message.includes('FILE_ENDED')) {
+			message = 'Archive ended unexpectedly. This file may be incomplete/corrupted, or not a real ZIP-based CBZ (for example, a renamed RAR).';
+		}
+
+		alert('Failed to load CBZ file: ' + message);
 	}
 }
 

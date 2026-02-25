@@ -73,13 +73,16 @@
         }
 
         #comic-image,
-        #comic-image-2 {
+        #comic-image-2,
+        #comic-video,
+        #comic-video-2 {
             display: block;
             user-select: none;
             cursor: grab;
         }
 
-        #comic-image-2.hidden {
+        #comic-image-2.hidden,
+        #comic-video-2.hidden {
             display: none;
         }
 
@@ -299,6 +302,8 @@
         <div class="image-container">
             <canvas id="comic-image" class="hidden"></canvas>
             <canvas id="comic-image-2" class="hidden"></canvas>
+            <video id="comic-video" class="hidden" controls loop playsinline></video>
+            <video id="comic-video-2" class="hidden" controls loop playsinline></video>
         </div>
         <div id="zoom-indicator" class="zoom-indicator">100%</div>
     </div>

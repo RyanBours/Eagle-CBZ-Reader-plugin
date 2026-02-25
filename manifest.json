@@ -22,7 +22,7 @@
                 "path": "viewer/index.html"
             }
         },
-        "zip": {
+        "zip,rar": {
             "inspector": {
                 "path": "inspector/index.html",
                 "height": 100,

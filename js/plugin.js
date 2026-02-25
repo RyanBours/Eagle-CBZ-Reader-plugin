@@ -1,6 +1,48 @@
 const unzipper = require('unzipper');
 const fs = require('fs');
 const path = require('path');
+let heicConvert = null;
+
+try {
+	heicConvert = require('heic-convert');
+} catch (error) {
+	console.warn('heic-convert is not available. HEIC files will use native decode fallback.', error?.message || error);
+}
+
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif'];
+const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.m4v', '.ogv'];
+const SUPPORTED_MEDIA_EXTENSIONS = [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS];
+
+function normalizeZipPath(zipPath) {
+	if (!zipPath) return '';
+	return zipPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+/g, '/');
+}
+
+function getEntryExtension(file) {
+	const normalizedPath = normalizeZipPath(file?.path || '');
+	return path.extname(normalizedPath).toLowerCase();
+}
+
+function isDirectoryEntry(file) {
+	const normalizedPath = normalizeZipPath(file?.path || '');
+	return file?.type === 'Directory' || normalizedPath.endsWith('/');
+}
+
+function isSupportedMediaEntry(file) {
+	if (!file || isDirectoryEntry(file)) {
+		return false;
+	}
+
+	const normalizedPath = normalizeZipPath(file.path);
+	const ext = getEntryExtension(file);
+	return SUPPORTED_MEDIA_EXTENSIONS.includes(ext) && !normalizedPath.startsWith('__MACOSX/');
+}
+
+function sortByNormalizedPath(a, b) {
+	const pathA = normalizeZipPath(a.path);
+	const pathB = normalizeZipPath(b.path);
+	return pathA.localeCompare(pathB, undefined, { numeric: true, sensitivity: 'base' });
+}
 
 // Comic reader state
 let currentPage = 1;
@@ -23,6 +65,128 @@ let panY = 0;
 // UI Elements
 let comicImage, pageInput, totalPagesSpan, prevBtn, nextBtn, loader, comicViewer, zoomIndicator, recenterBtn, fitBtn, autoFitBtn;
 let previewToggleBtn, previewPanel, thumbnailGrid, dualPageBtn, comicImage2, coverOffsetBtn, readDirectionBtn;
+let comicVideo, comicVideo2;
+let activeObjectUrls = new Set();
+
+function isHeic(ext) {
+	return ext === '.heic' || ext === '.heif';
+}
+
+function getVideoMimeType(ext) {
+	switch (ext) {
+		case 'mp4':
+		case 'm4v':
+			return 'video/mp4';
+		case 'webm':
+			return 'video/webm';
+		case 'mov':
+			return 'video/quicktime';
+		case 'ogv':
+			return 'video/ogg';
+		default:
+			return `video/${ext}`;
+	}
+}
+
+function createVideoThumbPlaceholder(pageNumber) {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="180" height="240" viewBox="0 0 180 240"><rect width="100%" height="100%" fill="#222"/><polygon points="70,80 130,120 70,160" fill="#25b09b"/><text x="90" y="210" font-family="Arial, sans-serif" font-size="16" text-anchor="middle" fill="#fff">Video ${pageNumber}</text></svg>`;
+	return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function toNodeBuffer(value) {
+	if (Buffer.isBuffer(value)) {
+		return value;
+	}
+	if (value instanceof Uint8Array) {
+		return Buffer.from(value);
+	}
+	return Buffer.from(value || []);
+}
+
+function createMediaSource(buffer, mimeType, useObjectUrl = false) {
+	const normalizedBuffer = toNodeBuffer(buffer);
+
+	if (useObjectUrl && typeof Blob !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+		try {
+			const blob = new Blob([normalizedBuffer], { type: mimeType });
+			const objectUrl = URL.createObjectURL(blob);
+			activeObjectUrls.add(objectUrl);
+			return objectUrl;
+		} catch (error) {
+			console.warn('Failed to create object URL, falling back to data URL.', error?.message || error);
+		}
+	}
+
+	const base64 = normalizedBuffer.toString('base64');
+	return `data:${mimeType};base64,${base64}`;
+}
+
+function clearVideoElementSource(videoElement) {
+	if (!videoElement) return;
+	videoElement.pause();
+	videoElement.removeAttribute('src');
+	videoElement.load();
+}
+
+function revokeActiveObjectUrls() {
+	if (!activeObjectUrls.size) return;
+	for (const objectUrl of activeObjectUrls) {
+		try {
+			URL.revokeObjectURL(objectUrl);
+		} catch (error) {
+			console.warn('Failed to revoke object URL.', error?.message || error);
+		}
+	}
+	activeObjectUrls = new Set();
+}
+
+async function createPageFromZipFile(file, pageNumber) {
+	const ext = getEntryExtension(file);
+	let buffer = toNodeBuffer(await file.buffer());
+	let mimeType;
+
+	if (IMAGE_EXTENSIONS.includes(ext)) {
+		if (isHeic(ext)) {
+			if (heicConvert) {
+				try {
+					buffer = toNodeBuffer(await heicConvert({
+						buffer,
+						format: 'JPEG',
+						quality: 0.9
+					}));
+					mimeType = 'image/jpeg';
+				} catch (convertError) {
+					console.warn(`HEIC conversion failed for ${normalizeZipPath(file.path)}. Falling back to native decode.`, convertError?.message || convertError);
+					mimeType = 'image/heic';
+				}
+			} else {
+				mimeType = 'image/heic';
+			}
+		}
+
+		if (!mimeType) {
+			mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : `image/${ext.substring(1)}`;
+		}
+		const src = createMediaSource(buffer, mimeType);
+
+		return {
+			type: 'image',
+			src,
+			thumbnailSrc: src
+		};
+	}
+
+	if (VIDEO_EXTENSIONS.includes(ext)) {
+		const mimeType = getVideoMimeType(ext.substring(1));
+		return {
+			type: 'video',
+			src: createMediaSource(buffer, mimeType, true),
+			thumbnailSrc: createVideoThumbPlaceholder(pageNumber)
+		};
+	}
+
+	return null;
+}
 
 eagle.onPluginCreate((plugin) => {
 	console.log('eagle.onPluginCreate');
@@ -49,6 +213,8 @@ function pluginInit() {
 	thumbnailGrid = document.getElementById('thumbnail-grid');
 	dualPageBtn = document.getElementById('dual-page-btn');
 	comicImage2 = document.getElementById('comic-image-2');
+	comicVideo = document.getElementById('comic-video');
+	comicVideo2 = document.getElementById('comic-video-2');
 	coverOffsetBtn = document.getElementById('cover-offset-btn');
 	readDirectionBtn = document.getElementById('read-direction-btn');
 
@@ -90,8 +256,48 @@ function pluginInit() {
 	comicViewer.addEventListener('mouseleave', endPan);
 }
 
+function getPrimaryMediaElement() {
+	if (comicVideo && !comicVideo.classList.contains('hidden')) {
+		return comicVideo;
+	}
+	if (comicImage && !comicImage.classList.contains('hidden')) {
+		return comicImage;
+	}
+	return null;
+}
+
+function getSecondaryMediaElement() {
+	if (comicVideo2 && !comicVideo2.classList.contains('hidden')) {
+		return comicVideo2;
+	}
+	if (comicImage2 && !comicImage2.classList.contains('hidden')) {
+		return comicImage2;
+	}
+	return null;
+}
+
+function getMediaDimensions(element) {
+	if (!element) {
+		return { width: 0, height: 0 };
+	}
+
+	if (element.tagName === 'VIDEO') {
+		return {
+			width: element.videoWidth || 0,
+			height: element.videoHeight || 0
+		};
+	}
+
+	return {
+		width: element.width || 0,
+		height: element.height || 0
+	};
+}
+
 function handleZoom(event) {
-	if (!comicImage.width || comicImage.classList.contains('hidden')) return;
+	const primaryMedia = getPrimaryMediaElement();
+	const { width } = getMediaDimensions(primaryMedia);
+	if (!primaryMedia || !width) return;
 
 	event.preventDefault();
 
@@ -107,41 +313,45 @@ function handleZoom(event) {
 }
 
 function updateZoom() {
-	if (!comicImage.width || !comicImage.height) return;
+	const primaryMedia = getPrimaryMediaElement();
+	const primarySize = getMediaDimensions(primaryMedia);
+	if (!primaryMedia || !primarySize.width || !primarySize.height) return;
 
 	// Calculate scaled dimensions
-	const scaledWidth = comicImage.width * currentZoom;
-	const scaledHeight = comicImage.height * currentZoom;
+	const scaledWidth = primarySize.width * currentZoom;
+	const scaledHeight = primarySize.height * currentZoom;
 
 	if (currentZoom === 1) {
 		// At 100%, fit to viewport
-		comicImage.style.width = 'auto';
-		comicImage.style.height = 'auto';
-		comicImage.style.maxWidth = '100%';
-		comicImage.style.maxHeight = '100%';
+		primaryMedia.style.width = 'auto';
+		primaryMedia.style.height = 'auto';
+		primaryMedia.style.maxWidth = '100%';
+		primaryMedia.style.maxHeight = '100%';
 	} else {
 		// When zoomed, set explicit dimensions
-		comicImage.style.width = scaledWidth + 'px';
-		comicImage.style.height = scaledHeight + 'px';
-		comicImage.style.maxWidth = 'none';
-		comicImage.style.maxHeight = 'none';
+		primaryMedia.style.width = scaledWidth + 'px';
+		primaryMedia.style.height = scaledHeight + 'px';
+		primaryMedia.style.maxWidth = 'none';
+		primaryMedia.style.maxHeight = 'none';
 	}
 
-	// Also update second canvas if in dual-page mode
-	if (dualPageMode && !comicImage2.classList.contains('hidden') && comicImage2.width && comicImage2.height) {
-		const scaledWidth2 = comicImage2.width * currentZoom;
-		const scaledHeight2 = comicImage2.height * currentZoom;
+	// Also update second media if in dual-page mode
+	const secondaryMedia = getSecondaryMediaElement();
+	const secondarySize = getMediaDimensions(secondaryMedia);
+	if (dualPageMode && secondaryMedia && secondarySize.width && secondarySize.height) {
+		const scaledWidth2 = secondarySize.width * currentZoom;
+		const scaledHeight2 = secondarySize.height * currentZoom;
 
 		if (currentZoom === 1) {
-			comicImage2.style.width = 'auto';
-			comicImage2.style.height = 'auto';
-			comicImage2.style.maxWidth = '100%';
-			comicImage2.style.maxHeight = '100%';
+			secondaryMedia.style.width = 'auto';
+			secondaryMedia.style.height = 'auto';
+			secondaryMedia.style.maxWidth = '100%';
+			secondaryMedia.style.maxHeight = '100%';
 		} else {
-			comicImage2.style.width = scaledWidth2 + 'px';
-			comicImage2.style.height = scaledHeight2 + 'px';
-			comicImage2.style.maxWidth = 'none';
-			comicImage2.style.maxHeight = 'none';
+			secondaryMedia.style.width = scaledWidth2 + 'px';
+			secondaryMedia.style.height = scaledHeight2 + 'px';
+			secondaryMedia.style.maxWidth = 'none';
+			secondaryMedia.style.maxHeight = 'none';
 		}
 	}
 }
@@ -161,7 +371,9 @@ function showZoomIndicator() {
 }
 
 function startPan(event) {
-	if (!comicImage.width || comicImage.classList.contains('hidden')) return;
+	const primaryMedia = getPrimaryMediaElement();
+	const { width } = getMediaDimensions(primaryMedia);
+	if (!primaryMedia || !width) return;
 	if (event.button !== 0) return; // Only left mouse button
 
 	isPanning = true;
@@ -197,7 +409,9 @@ function updatePan() {
 }
 
 function recenterImage() {
-	if (!comicImage.width || comicImage.classList.contains('hidden')) return;
+	const primaryMedia = getPrimaryMediaElement();
+	const { width } = getMediaDimensions(primaryMedia);
+	if (!primaryMedia || !width) return;
 
 	// Reset zoom and pan position
 	currentZoom = 1;
@@ -209,20 +423,24 @@ function recenterImage() {
 }
 
 function fitToScreen() {
-	if (!comicImage.width || comicImage.classList.contains('hidden')) return;
+	const primaryMedia = getPrimaryMediaElement();
+	const primarySize = getMediaDimensions(primaryMedia);
+	if (!primaryMedia || !primarySize.width || !primarySize.height) return;
 
 	// Calculate zoom to fit image to screen
 	const viewerWidth = comicViewer.clientWidth;
 	const viewerHeight = comicViewer.clientHeight;
 
 	// Get actual canvas dimensions
-	const imgWidth = comicImage.width;
-	const imgHeight = comicImage.height;
+	const imgWidth = primarySize.width;
+	const imgHeight = primarySize.height;
 
 	// In dual-page mode, consider both images
 	let totalWidth = imgWidth;
-	if (dualPageMode && !comicImage2.classList.contains('hidden') && comicImage2.width) {
-		totalWidth += comicImage2.width; // No gap
+	const secondaryMedia = getSecondaryMediaElement();
+	const secondarySize = getMediaDimensions(secondaryMedia);
+	if (dualPageMode && secondaryMedia && secondarySize.width) {
+		totalWidth += secondarySize.width; // No gap
 	}
 
 	if (imgWidth && imgHeight) {
@@ -278,10 +496,12 @@ function updateDualPageButton() {
 }
 
 function updateDualPageView() {
-	if (dualPageMode) {
-		comicImage2.classList.remove('hidden');
-	} else {
-		comicImage2.classList.add('hidden');
+	if (!dualPageMode) {
+		if (comicImage2) comicImage2.classList.add('hidden');
+		if (comicVideo2) {
+			comicVideo2.pause();
+			comicVideo2.classList.add('hidden');
+		}
 	}
 	updateImageOrder();
 }
@@ -361,8 +581,11 @@ function generateThumbnails() {
 			img.classList.add('active');
 		}
 
+		const page = pages[index];
+
 		// Store original data for lazy loading
-		img.dataset.src = pages[index];
+		img.dataset.src = page.thumbnailSrc;
+		img.dataset.type = page.type;
 		img.dataset.index = index;
 
 		// Add loading attribute
@@ -396,7 +619,11 @@ function generateThumbnails() {
 					if (!thumbnail.src && thumbnail.dataset.src) {
 						// Schedule thumbnail creation
 						requestIdleCallback(() => {
-							createDownscaledThumbnail(thumbnail.dataset.src, thumbnail);
+							if (thumbnail.dataset.type === 'video') {
+								thumbnail.src = thumbnail.dataset.src;
+							} else {
+								createDownscaledThumbnail(thumbnail.dataset.src, thumbnail);
+							}
 						}, { timeout: 2000 });
 						observer.unobserve(thumbnail);
 					}
@@ -455,29 +682,30 @@ function updateThumbnailActive() {
 async function loadCBZ(filePath) {
 	try {
 		loader.classList.remove('hidden');
+		clearVideoElementSource(comicVideo);
+		clearVideoElementSource(comicVideo2);
+		revokeActiveObjectUrls();
 		pages = [];
-
-		// Supported image extensions
-		const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
 
 		// Read and extract CBZ file
 		const directory = await unzipper.Open.file(filePath);
 
-		// Filter and sort image files
-		const imageFiles = directory.files
-			.filter(file => {
-				const ext = path.extname(file.path).toLowerCase();
-				return imageExtensions.includes(ext) && !file.path.startsWith('__MACOSX');
-			})
-			.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' }));
+		// Filter and sort media files
+		const mediaFiles = directory.files
+			.filter(isSupportedMediaEntry)
+			.sort(sortByNormalizedPath);
 
-		// Extract images to base64
-		for (const file of imageFiles) {
-			const buffer = await file.buffer();
-			const ext = path.extname(file.path).toLowerCase().substring(1);
-			const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
-			const base64 = buffer.toString('base64');
-			pages.push(`data:${mimeType};base64,${base64}`);
+		// Extract media to data URLs
+		for (let index = 0; index < mediaFiles.length; index++) {
+			const file = mediaFiles[index];
+			try {
+				const page = await createPageFromZipFile(file, index + 1);
+				if (page) {
+					pages.push(page);
+				}
+			} catch (entryError) {
+				console.warn(`Skipping unsupported media entry: ${normalizeZipPath(file.path)}`, entryError?.message || entryError);
+			}
 		}
 
 		totalPages = pages.length;
@@ -516,7 +744,7 @@ async function loadCBZ(filePath) {
 				fitDisabled: fitBtn?.disabled
 			}); showPage(1);
 		} else {
-			throw new Error('No images found in CBZ file');
+			throw new Error('No supported images or videos found in CBZ file');
 		} loader.classList.add('hidden');
 	} catch (error) {
 		console.error('Error loading CBZ:', error);
@@ -530,23 +758,15 @@ function showPage(pageNumber) {
 
 	currentPage = pageNumber;
 	pageInput.value = currentPage;
+	const currentPageData = pages[currentPage - 1];
 
-	// Load the page image(s)
-	if (pages[currentPage - 1]) {
-		// Load first image onto canvas
-		const img1 = new Image();
-		img1.onload = () => {
-			const ctx = comicImage.getContext('2d');
-			comicImage.width = img1.width;
-			comicImage.height = img1.height;
-			ctx.drawImage(img1, 0, 0);
-			comicImage.classList.remove('hidden');
-
+	// Load the page media
+	if (currentPageData) {
+		renderPageToSlot(currentPageData, comicImage, comicVideo, () => {
 			if (autoFitOnPageChange) {
 				fitToScreen();
 			}
-		};
-		img1.src = pages[currentPage - 1];
+		});
 
 		// Load second page if in dual-page mode
 		// With cover offset: page 1 shows alone, page 2+ shows in pairs (2-3, 4-5, etc.)
@@ -569,24 +789,15 @@ function showPage(pageNumber) {
 		}
 
 		if (shouldShowSecondPage && pages[secondPageIndex]) {
-			const img2 = new Image();
-			img2.onload = () => {
-				const ctx2 = comicImage2.getContext('2d');
-				comicImage2.width = img2.width;
-				comicImage2.height = img2.height;
-				ctx2.drawImage(img2, 0, 0);
-				comicImage2.classList.remove('hidden');
-
-				// Apply current zoom to second image
+			renderPageToSlot(pages[secondPageIndex], comicImage2, comicVideo2, () => {
 				if (autoFitOnPageChange) {
 					fitToScreen();
 				} else {
 					updateZoom();
 				}
-			};
-			img2.src = pages[secondPageIndex];
+			});
 		} else {
-			comicImage2.classList.add('hidden');
+			resetSecondarySlot();
 		}
 
 		// Update image order based on reading direction
@@ -600,17 +811,67 @@ function showPage(pageNumber) {
 	updateThumbnailActive();
 }
 
+function resetSecondarySlot() {
+	if (comicImage2) {
+		comicImage2.classList.add('hidden');
+	}
+	if (comicVideo2) {
+		clearVideoElementSource(comicVideo2);
+		comicVideo2.classList.add('hidden');
+	}
+}
+
+function renderPageToSlot(pageData, canvasElement, videoElement, onReady) {
+	if (!pageData) return;
+
+	if (pageData.type === 'video') {
+		if (canvasElement) {
+			canvasElement.classList.add('hidden');
+		}
+
+		if (videoElement) {
+			videoElement.pause();
+			videoElement.src = pageData.src;
+			videoElement.currentTime = 0;
+			videoElement.classList.remove('hidden');
+			videoElement.onloadedmetadata = () => {
+				videoElement.play().catch(() => {
+					// ignore autoplay errors
+				});
+				if (onReady) onReady();
+			};
+		}
+		return;
+	}
+
+	if (videoElement) {
+		clearVideoElementSource(videoElement);
+		videoElement.classList.add('hidden');
+	}
+
+	const image = new Image();
+	image.onload = () => {
+		const context = canvasElement.getContext('2d');
+		canvasElement.width = image.width;
+		canvasElement.height = image.height;
+		context.drawImage(image, 0, 0);
+		canvasElement.classList.remove('hidden');
+		if (onReady) onReady();
+	};
+	image.src = pageData.src;
+}
+
 function preloadNextImage() {
 	// Preload the next image in the background
-	if (currentPage < totalPages && pages[currentPage]) {
+	if (currentPage < totalPages && pages[currentPage]?.type === 'image') {
 		const preloadImg = new Image();
-		preloadImg.src = pages[currentPage];
+		preloadImg.src = pages[currentPage].src;
 	}
 
 	// Also preload previous image for smooth backward navigation
-	if (currentPage > 1 && pages[currentPage - 2]) {
+	if (currentPage > 1 && pages[currentPage - 2]?.type === 'image') {
 		const preloadPrevImg = new Image();
-		preloadPrevImg.src = pages[currentPage - 2];
+		preloadPrevImg.src = pages[currentPage - 2].src;
 	}
 }
 
@@ -706,4 +967,7 @@ eagle.onPluginHide(() => {
 
 eagle.onPluginBeforeExit((event) => {
 	console.log('eagle.onPluginBeforeExit');
+	clearVideoElementSource(comicVideo);
+	clearVideoElementSource(comicVideo2);
+	revokeActiveObjectUrls();
 });

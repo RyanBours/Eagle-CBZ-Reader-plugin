@@ -22,11 +22,11 @@
                 "path": "viewer/index.html"
             }
         },
-        "zip,rar": {
+        "zip,rar,png,jpg,jpeg,heic": {
             "inspector": {
-                "path": "inspector/index.html",
+                "path": "inspector/multi.html",
                 "height": 100,
-                "multiSelect": false
+                "multiSelect": true
             }
         }
     },

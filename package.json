@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "heic-convert": "^2.1.0",
     "node-unrar-js": "^2.0.2",
     "unzipper": "^0.12.3"

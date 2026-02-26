@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>Zip Merger</title>
+    <style>
+        html {
+            font-size: 11px;
+            font-family: sans-serif;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        body {
+            padding: 0;
+            margin: 0;
+            color: transparent;
+        }
+
+        /* colors for different themes */
+
+        body[theme="LIGHT"],
+        body[theme="LIGHTGRAY"] {
+            color: black;
+        }
+
+        body[theme="GRAY"],
+        body[theme="BLUE"],
+        body[theme="PURPLE"],
+        body[theme="DARK"] {
+            color: white;
+        }
+
+        button {
+            margin-left: 8px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+    Zip Merger
+    <button id="convert-selected-btn">Convert to .cbz</button>
+    <button id="zip-selected-btn">Zip selected files</button>
+    <script>
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        const AdmZip = require('adm-zip');
+
+        const logSelectedFiles = async () => {
+            const items = await eagle.item.getSelected();
+
+            console.log('Selected files:', items.length);
+            items.forEach((selectedItem, index) => {
+                console.log(`[${index + 1}]`, {
+                    id: selectedItem.id,
+                    name: selectedItem.name,
+                    ext: selectedItem.ext,
+                    filePath: selectedItem.filePath
+                });
+            });
+        };
+
+        const createZipFromSelectedFiles = async () => {
+            const items = await eagle.item.getSelected();
+
+            if (!items || items.length < 2) {
+                alert('Select at least 2 files to merge into a zip.');
+                return;
+            }
+
+            const zip = new AdmZip();
+            const usedNames = new Set();
+
+            items.forEach((selectedItem, index) => {
+                if (!selectedItem.filePath || !fs.existsSync(selectedItem.filePath)) {
+                    return;
+                }
+
+                const sourcePath = selectedItem.filePath;
+                const sourceName = path.basename(sourcePath);
+                let zipName = sourceName;
+
+                if (usedNames.has(zipName)) {
+                    const parsed = path.parse(sourceName);
+                    let duplicateCounter = 2;
+                    while (usedNames.has(`${parsed.name}_${duplicateCounter}${parsed.ext}`)) {
+                        duplicateCounter++;
+                    }
+                    zipName = `${parsed.name}_${duplicateCounter}${parsed.ext}`;
+                }
+
+                usedNames.add(zipName);
+                zip.addLocalFile(sourcePath, '', zipName);
+                console.log(`[${index + 1}] added to zip: ${zipName}`);
+            });
+
+            if (zip.getEntries().length === 0) {
+                alert('No valid files were found to add to zip.');
+                return;
+            }
+
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const zipPath = path.join(os.tmpdir(), `merged-${timestamp}.zip`);
+            zip.writeZip(zipPath);
+
+            console.log(`Zip created: ${zipPath}`);
+
+            let operationSucceeded = false;
+
+            try {
+                if (eagle.item && typeof eagle.item.addFromPath === 'function') {
+                    const addResult = await eagle.item.addFromPath(zipPath);
+                    console.log('Added merged zip as new item:', addResult);
+                    operationSucceeded = true;
+                    alert('Merged zip created and added to Eagle as a new item.');
+                } else {
+                    const targetItem = items[0];
+                    if (!targetItem || !targetItem.filePath || !fs.existsSync(targetItem.filePath)) {
+                        throw new Error('Cannot replace first selected item because its source file is missing.');
+                    }
+
+                    const replaceResult = await targetItem.replaceFile(zipPath);
+                    console.log('Replace result:', replaceResult);
+                    operationSucceeded = true;
+                    alert('Merged zip created and first selected item replaced successfully.');
+                }
+            } catch (operationError) {
+                console.error('Failed to import/replace merged zip:', operationError);
+                alert(`Zip created but Eagle import failed.\n\nFile saved at:\n${zipPath}\n\nError: ${operationError.message}`);
+            }
+
+            if (operationSucceeded) {
+                try {
+                    fs.unlinkSync(zipPath);
+                } catch (cleanupErr) {
+                    console.warn('Could not delete temp zip file:', cleanupErr);
+                }
+            }
+        };
+
+        const convertSelectedToCbz = async () => {
+            const items = await eagle.item.getSelected();
+
+            if (!items || items.length === 0) {
+                alert('No files selected.');
+                return;
+            }
+
+            let convertedCount = 0;
+            let skippedCount = 0;
+
+            for (const selectedItem of items) {
+                const ext = (selectedItem.ext || '').toLowerCase();
+
+                if (!selectedItem.filePath || !fs.existsSync(selectedItem.filePath)) {
+                    skippedCount++;
+                    continue;
+                }
+
+                if (ext === 'cbz') {
+                    skippedCount++;
+                    continue;
+                }
+
+                const originalPath = selectedItem.filePath;
+                const baseName = path.basename(originalPath, path.extname(originalPath));
+                const tempPath = path.join(os.tmpdir(), `${baseName}-${Date.now()}.cbz`);
+
+                try {
+                    fs.copyFileSync(originalPath, tempPath);
+                    const replaceResult = await selectedItem.replaceFile(tempPath);
+                    console.log('Convert replace result:', replaceResult, selectedItem.id);
+                    convertedCount++;
+                } catch (convertError) {
+                    skippedCount++;
+                    console.error(`Failed converting item ${selectedItem.id} to cbz:`, convertError);
+                } finally {
+                    try {
+                        if (fs.existsSync(tempPath)) {
+                            fs.unlinkSync(tempPath);
+                        }
+                    } catch (cleanupErr) {
+                        console.warn('Could not delete temp cbz file:', cleanupErr);
+                    }
+                }
+            }
+
+            alert(`Conversion complete.\nConverted: ${convertedCount}\nSkipped/Failed: ${skippedCount}`);
+        };
+
+        // Listen to plugin creation
+        eagle.onPluginCreate(async (plugin) => {
+
+            // Get the current theme
+            const theme = await eagle.app.theme;
+            document.body.setAttribute('theme', theme);
+
+            await logSelectedFiles();
+            console.log(theme);
+
+            const zipSelectedBtn = document.getElementById('zip-selected-btn');
+            if (zipSelectedBtn) {
+                zipSelectedBtn.addEventListener('click', createZipFromSelectedFiles);
+            }
+
+            const convertSelectedBtn = document.getElementById('convert-selected-btn');
+            if (convertSelectedBtn) {
+                convertSelectedBtn.addEventListener('click', convertSelectedToCbz);
+            }
+        });
+
+        // Listen to theme changes
+        eagle.onThemeChanged((theme) => {
+            document.body.setAttribute('theme', theme);
+        });
+    </script>
+</body>
+
+</html>

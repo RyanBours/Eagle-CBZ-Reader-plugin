@@ -45,6 +45,25 @@ function sortByNormalizedPath(a, b) {
 	return pathA.localeCompare(pathB, undefined, { numeric: true, sensitivity: 'base' });
 }
 
+function getFolderPath(entryPath) {
+	const normalizedPath = normalizeZipPath(entryPath || '');
+	const lastSlashIndex = normalizedPath.lastIndexOf('/');
+	if (lastSlashIndex <= 0) {
+		return '';
+	}
+	return normalizedPath.substring(0, lastSlashIndex);
+}
+
+function getFolderLabel(folderPath) {
+	if (!folderPath) {
+		return 'Root';
+	}
+
+	const normalizedFolderPath = normalizeZipPath(folderPath);
+	const segments = normalizedFolderPath.split('/').filter(Boolean);
+	return segments.length ? segments[segments.length - 1] : 'Root';
+}
+
 function matchesSignature(header, signature) {
 	if (!header || header.length < signature.length) {
 		return false;
@@ -222,6 +241,7 @@ function revokeActiveObjectUrls() {
 
 async function createPageFromZipFile(file, pageNumber) {
 	const ext = getEntryExtension(file);
+	const folderPath = getFolderPath(file?.path || '');
 	let buffer = toNodeBuffer(await file.buffer());
 	let mimeType;
 
@@ -252,7 +272,8 @@ async function createPageFromZipFile(file, pageNumber) {
 		return {
 			type: 'image',
 			src,
-			thumbnailSrc: src
+			thumbnailSrc: src,
+			folderPath
 		};
 	}
 
@@ -261,7 +282,8 @@ async function createPageFromZipFile(file, pageNumber) {
 		return {
 			type: 'video',
 			src: createMediaSource(buffer, mimeType, true),
-			thumbnailSrc: createVideoThumbPlaceholder(pageNumber)
+			thumbnailSrc: createVideoThumbPlaceholder(pageNumber),
+			folderPath
 		};
 	}
 
@@ -651,7 +673,21 @@ function generateThumbnails() {
 	// Create all thumbnail elements first (fast)
 	const fragment = document.createDocumentFragment();
 
+	let previousFolderPath = null;
+
 	for (let index = 0; index < pages.length; index++) {
+		const page = pages[index];
+		const folderPath = page.folderPath || '';
+
+		if (folderPath !== previousFolderPath) {
+			const divider = document.createElement('div');
+			divider.className = 'thumbnail-divider';
+			divider.textContent = getFolderLabel(folderPath);
+			divider.title = folderPath || 'Root';
+			fragment.appendChild(divider);
+			previousFolderPath = folderPath;
+		}
+
 		const wrapper = document.createElement('div');
 		wrapper.className = 'thumbnail-wrapper';
 
@@ -660,8 +696,6 @@ function generateThumbnails() {
 		if (index === currentPage - 1) {
 			img.classList.add('active');
 		}
-
-		const page = pages[index];
 
 		// Store original data for lazy loading
 		img.dataset.src = page.thumbnailSrc;
